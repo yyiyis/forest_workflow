@@ -1,0 +1,388 @@
+---
+title: "forest_plot"
+subtitle: "模型的森林图呈现形式"
+author: "YISEN YANG"
+date: "2023-11-16"
+format:
+  html:
+    theme: litera
+    toc: true
+---
+
+定制
+
++ forest for single model
+
++ stratification
+
++ training and test set
+
+
+主要是构造dataframe 格式(R在这方面是瑞士军刀), 
+
+然后喂给function, 同时总结常用的图的格式修改方法, 以及中文的兼容
+
+
+最后再统一 `knitr::kable()`
+
+```{r}
+rm(list = ls())
+```
+
+
+# load packages and data
+
+```{r, warning=FALSE, message=FALSE}
+#|label: packages
+library(tidyverse)
+library(forestploter)
+library(grid)
+library(rsample)
+```
+
+随机挑一部分数据出来
+
+id 盲掉
+
+```{r}
+#|label: data
+load("D:/r4ds/SW/wsr/code/data_total_10_22_including_cut_cont.Rdata")
+set.seed(567)
+data <- data_total_10_22 |> 
+  slice_sample(prop = 0.1) |> 
+  select(id, age, GENDER, CKD_EPI_cut, NEAP_cut)
+data <- data|> 
+  mutate(id = c(1:nrow(data)))
+glimpse(data)
+```
+
+## function
+
+```{r}
+yysfun_ORCIP_all <- function(model){
+  sum <- summary(model)
+  coeff <- sum$coefficients|> as.data.frame() |> 
+      mutate(beta_std = Estimate*`Std. Error`/(pi/sqrt(3)))
+  coef <- cbind(coeff,
+        exp(cbind(OR = coef(model), 
+                  confint(model)))) |> round(5)
+  coef2 <- coef[c(2:nrow(coeff)), c(6:8, 4)] |> 
+    mutate(OR_95CI = paste(sprintf("%.2f", OR), 
+                         paste("(", paste(sprintf("%.2f", `2.5 %`), 
+                                          sprintf("%.2f", `97.5 %`), sep = ","), ")", 
+                               sep = ""),
+                         sep = " "),
+           `Pr(>|z|)` = sprintf("%.3f", `Pr(>|z|)`)) |> 
+    rename(`OR (95% CI)` = OR_95CI,
+           P = `Pr(>|z|)`,
+           lci = `2.5 %`,
+           uci = `97.5 %`) |> 
+    select(`OR (95% CI)`, P, OR, lci, uci) 
+  
+  coef_final <- coef2
+  coef_final <- coef_final |> mutate(Variable = rownames(coef_final), .before = 1)
+  rownames(coef_final) <- NULL
+  coef_final$` ` <- paste(rep(" ", nrow(coef_final)), collapse = " ")
+  coef_final$id <- c(1:nrow(coef_final))
+  coef_final$P <- ifelse(coef_final$P  == "0.000", "<0.001", coef_final$P)
+  coef_final$Variable <- ifelse(is.na(coef_final$OR), 
+                                coef_final$Variable,
+                                paste0("  ", coef_final$Variable))
+  coef_final
+}
+```
+
+
+## form 1 
+
+后面仅针对 interesting varible(s) 时候再取子集就行了
+
+`OR (95% CI)` and `P`
+
+
+模型构建
+
+```{r}
+fitm <- glm(formula = CKD_EPI_cut ~ NEAP_cut + 
+              age + GENDER,
+              family = "binomial", data = data)
+```
+
+
+```{r}
+yysfun_ORCIP_all(fitm)
+```
+
+
+
+lci 和 uci 保留5位小数, 是为了后面作图的精确
+
+空白行是为了誊位置给森林图
+
+
+### plot
+
+传给dt, 后面作图用
+
+```{r}
+dt <- yysfun_ORCIP_all(fitm)
+dt |> knitr::kable()
+```
+
+筛出来sig 对应行数, 为了后面森林图改颜色
+
+```{r}
+psig <- dt |> filter(P < 0.05) |> select(id) |> as.matrix() |> c()
+psig
+```
+
+
+主题
+
+```{r}
+tm <- forest_theme(base_size = 10,
+                   # Confidence interval point shape, line type/color/width
+                   ci_pch = 16,
+                   ci_col = "#762a83",
+                   ci_lty = 1,
+                   ci_lwd = 1.5,
+                   ci_Theight = 0.2, 
+                   # Reference line width/type/color
+                   refline_lwd = 1,
+                   refline_lty = "dashed",
+                   refline_col = "grey20")
+```
+
+
++ `data` 对应需要的列的数据
+
++ `ci_column = 3` 指定了森林图放在整体的第三列(一共四列)
+
++ `ref_line = 1` 指定参考线, 当是 $\beta$ 时候需要是`0`
+
++ `xlim = c(0, 5)` 设置显示范围
+
++ `ticks_at = c(0, 1, 3, 5)`  坐标轴显示的具体的值
+
++ `row = psig`,   sig 的行变成红色
+
+
+```{r, dpi = 300, fig.height=2.163, fig.width=3.5}
+p <- forest(
+  data = dt[,c(1, 2, 7, 3)],  # 对应需要的列的数据
+  lower = dt$lci,
+  upper = dt$uci,
+  est = dt$OR,
+  ci_column = 3,  # 指定了森林图放在第三列(即第7列空白列)
+  ref_line = 1,  # 指定参考线(当是 $\beta$ 时候需要是0)
+  xlim = c(0, 5), # 设置显示范围
+  ticks_at = c(0, 1, 3, 5),  # 坐标轴显示的具体的值
+  theme = tm)
+
+pp <- edit_plot(p,
+                row = psig, # sig 的行变成红色
+                col = 3,
+                which = "ci",
+                gp = gpar(col = "red"))
+
+
+Cairo::CairoPNG(
+  filename = "forest.png",
+  width = 3.5, height = 2.163, units = "in", dpi = 300)
+
+print(pp)
+```
+
+
+如果想要输出中文的
+
+可以用`export`包中的`graph2pdf`, 指定`font = "GB1"` 即可
+
+(`names(pdfFonts())` 查看支持的字体)
+
+在 `print(pp)`后面放
+
+`graph2pdf(file = "test.pdf", width = 6.5, height = 5.5, font = "GB1")`即可
+
+
+
+## form 2
+
+对于分层的结果展示
+
+还是构建所需要的数据集
+
+
+```{r}
+fitm_male <- data |> 
+  filter(GENDER == "male") |> 
+  glm(formula = CKD_EPI_cut ~ NEAP_cut + 
+              age,
+              family = "binomial")
+```
+
+
+```{r}
+fitm_female <- data |> 
+  filter(GENDER == "female") |> 
+  glm(formula = CKD_EPI_cut ~ NEAP_cut + 
+              age,
+              family = "binomial")
+```
+
+
+构造数据
+
+```{r}
+dt_strat_f <- rbind(
+  tibble(Variable = c("male"), 
+         `OR (95% CI)` = " ", P = " ", 
+         OR = NA, lci = NA, uci = NA, 
+         ` ` =  " ", id = " "), 
+  
+  yysfun_ORCIP_all(fitm_male),
+  
+  tibble(Variable = c("female"), 
+         `OR (95% CI)` = " ", P = " ", 
+         OR = NA, lci = NA, uci = NA, 
+         ` ` =  " ", id = " "), 
+  
+  yysfun_ORCIP_all(fitm_female)
+)
+
+
+dt_strat_f$id <- c(1:nrow(dt_strat_f))
+dt_strat_f
+```
+
+
+### plot
+
+```{r}
+dt <- dt_strat_f
+```
+
+
+```{r}
+psig <- dt |> filter(P < 0.05) |> select(id) |> as.matrix() |> c()
+psig
+```
+
+
+```{r}
+pbold <- dt |> filter(is.na(OR)) |> select(id) |> as.matrix() |> c()
+pbold
+```
+
+
+开始画图
+
+```{r, dpi = 300, fig.height=3.5, fig.width=3.5}
+p2 <- forest(
+  data = dt[,c(1, 2, 7, 3)], 
+  lower = dt$lci,
+  upper = dt$uci,
+  est = dt$OR,
+  ci_column = 3, 
+  ref_line = 1,  
+  xlim = c(0, 5), 
+  ticks_at = c(0, 1, 3, 5),  
+  theme = tm)
+
+pp2 <- edit_plot(p2,
+                 row = psig, 
+                 col = 3,
+                 which = "ci",
+                 gp = gpar(col = "red"))
+
+pp2  <- edit_plot(pp2 ,
+                  row = pbold,
+                  gp = gpar(fontface = "bold"))
+
+
+Cairo::CairoPNG(
+  filename = "forest2.png",
+  width = 3.5, height = 3.5, units = "in", dpi = 300)
+
+print(pp2)
+```
+
+
+
+## form 3
+
+training and test set
+
+还是构建数据格式
+
+
+```{r}
+set.seed(567)
+data_split <- initial_split(data, 
+                            strata = CKD_EPI_cut) # 保证train 和 test里面标签比例一样
+
+train_data <- training(data_split)
+test_data <- testing(data_split)
+```
+
+
+
+
+```{r}
+fitm_train <- glm(formula = CKD_EPI_cut ~ NEAP_cut + 
+                  age + GENDER,
+                  family = "binomial", data = train_data)
+fitm_test <- glm(formula = CKD_EPI_cut ~ NEAP_cut + 
+                  age + GENDER,
+                  family = "binomial", data = test_data)
+```
+
+
+```{r}
+dt_ts <- list(
+  yysfun_ORCIP_all(fitm_train),
+  yysfun_ORCIP_all(fitm_test)) |> 
+  reduce(inner_join, by = "Variable")
+dt_ts |> view()
+```
+
+```{r}
+dt_ts |> colnames()
+```
+
+```{r}
+dt <- dt_ts |> 
+  rename(`OR (95% CI) train` = `OR (95% CI).x`,
+         `OR (95% CI) test` = `OR (95% CI).y`,
+         `P in train`= `P.x`,
+         `P in test`= `P.y`,
+          train = ` .x`,
+          test = ` .y`)
+```
+
+### plot
+
+```{r, dpi = 300, fig.height=2.5, fig.width=6.5}
+p <- forest(dt[,c(1, 2, 7, 3, 
+                     9, 14, 10)],
+            est = list(dt$OR.x,
+                       dt$OR.y),
+            lower = list(dt$lci.x,
+                         dt$lci.y), 
+            upper = list(dt$uci.x,
+                         dt$uci.y),
+            ci_column = c(3, 6),
+            ref_line = 1,
+            nudge_y = 0.2,
+            xlog = TRUE,
+            xlim = c(0, 5), 
+            ticks_at = c(0, 1, 3, 5), 
+            theme = tm)
+
+Cairo::CairoPNG(
+  filename = "forest3.png",
+  width = 6.5, height = 2.5, units = "in", dpi = 300)
+
+print(p)
+```
+
